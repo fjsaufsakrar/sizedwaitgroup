@@ -1,84 +1,64 @@
-// Based upon sync.WaitGroup, SizedWaitGroup allows to start multiple
-// routines and to wait for their end using the simple API.
-
-// SizedWaitGroup adds the feature of limiting the maximum number of
-// concurrently started routines. It could for example be used to start
-// multiples routines querying a database but without sending too much
-// queries in order to not overload the given database.
-//
-// Rémy Mathieu © 2016
 package sizedwaitgroup
 
 import (
-	"context"
-	"math"
 	"sync"
 )
 
-// SizedWaitGroup has the same role and close to the
-// same API as the Golang sync.WaitGroup but adds a limit of
-// the amount of goroutines started concurrently.
-type SizedWaitGroup struct {
-	Size int
-
-	current chan struct{}
-	wg      sync.WaitGroup
+// WaitGroup implements a simple goruntine pool.
+type WaitGroup struct {
+	size      int
+	pool      chan byte
+	waitCount int64
+	waitGroup sync.WaitGroup
 }
 
-// New creates a SizedWaitGroup.
-// The limit parameter is the maximum amount of
-// goroutines which can be started concurrently.
-func New(limit int) SizedWaitGroup {
-	size := math.MaxInt32 // 2^32 - 1
-	if limit > 0 {
-		size = limit
+// New creates a waitgroup with a specific size (the maximum number of
+// goroutines to run at the same time). If you use -1 as the size, all items
+// will run concurrently (just like a normal sync.WaitGroup)
+func New(size int) *WaitGroup {
+	wg := &WaitGroup{
+		size: size,
 	}
-	return SizedWaitGroup{
-		Size: size,
+	if size > 0 {
+		wg.pool = make(chan byte, size)
+	}
+	return wg
+}
 
-		current: make(chan struct{}, size),
-		wg:      sync.WaitGroup{},
+// Add add the function close to the waitgroup
+func (wg *WaitGroup) Add(closures ...func()) {
+	for _, c := range closures {
+		closure := c
+		wg.BlockAdd()
+		go func() {
+			defer wg.Done()
+			closure()
+		}()
 	}
 }
 
-// Add increments the internal WaitGroup counter.
-// It can be blocking if the limit of spawned goroutines
-// has been reached. It will stop blocking when Done is
-// been called.
-//
-// See sync.WaitGroup documentation for more information.
-func (s *SizedWaitGroup) Add() {
-	s.AddWithContext(context.Background())
-}
-
-// AddWithContext increments the internal WaitGroup counter.
-// It can be blocking if the limit of spawned goroutines
-// has been reached. It will stop blocking when Done is
-// been called, or when the context is canceled. Returns nil on
-// success or an error if the context is canceled before the lock
-// is acquired.
-//
-// See sync.WaitGroup documentation for more information.
-func (s *SizedWaitGroup) AddWithContext(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case s.current <- struct{}{}:
-		break
+// BlockAdd pushes ‘one’ into the group. Blocks if the group is full.
+func (wg *WaitGroup) BlockAdd() {
+	if wg.size > 0 {
+		wg.pool <- 1
 	}
-	s.wg.Add(1)
-	return nil
+	wg.waitGroup.Add(1)
 }
 
-// Done decrements the SizedWaitGroup counter.
-// See sync.WaitGroup documentation for more information.
-func (s *SizedWaitGroup) Done() {
-	<-s.current
-	s.wg.Done()
+// Done pops ‘one’ out the group.
+func (wg *WaitGroup) Done() {
+	if wg.size > 0 {
+		<-wg.pool
+	}
+	wg.waitGroup.Done()
 }
 
-// Wait blocks until the SizedWaitGroup counter is zero.
-// See sync.WaitGroup documentation for more information.
-func (s *SizedWaitGroup) Wait() {
-	s.wg.Wait()
+// Wait waiting the group empty
+func (wg *WaitGroup) Wait() {
+	wg.waitGroup.Wait()
+}
+
+// PendingCount returns the number of pending operations
+func (wg *WaitGroup) PendingCount() int64 {
+	return int64(len(wg.pool))
 }
